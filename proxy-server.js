@@ -1,4 +1,4 @@
-// Aura IPTV Proxy v5
+// Aura IPTV Proxy v6
 import express from "express";
 import cors from "cors";
 
@@ -126,6 +126,8 @@ app.post("/api/series-info", async (req, res) => {
 
 // ─── Stream proxy (resolves CORS for HLS + video files) ──────────────────────
 // Usage: GET /api/stream?url=<encoded_stream_url>
+// For M3U8: rewrites playlist and proxies segments
+// For TS segments: pipes with correct headers to avoid 458 blocks
 app.get("/api/stream", async (req, res) => {
   try {
     const { url } = req.query;
@@ -136,8 +138,11 @@ app.get("/api/stream", async (req, res) => {
 
     const upstream = await fetch(decodedUrl, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; AuraIPTV/1.0)",
-        "Accept": "*/*"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": new URL(decodedUrl).origin + "/",
+        "Origin": new URL(decodedUrl).origin
       }
     });
 
@@ -145,14 +150,15 @@ app.get("/api/stream", async (req, res) => {
       return res.status(upstream.status).json({ error: `Upstream error: ${upstream.status}` });
     }
 
-    const contentType = upstream.headers.get("content-type") || 
+    const contentType = upstream.headers.get("content-type") ||
       (isM3u8 ? "application/vnd.apple.mpegurl" : "video/mp2t");
 
     res.setHeader("Content-Type", contentType);
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Headers", "*");
+    res.setHeader("Cache-Control", "no-cache");
 
-    // M3U8 playlist — rewrite segment URLs through proxy
+    // M3U8 playlist — rewrite segment URLs through this proxy
     if (isM3u8) {
       const text = await upstream.text();
       const baseUrl = decodedUrl.substring(0, decodedUrl.lastIndexOf("/") + 1);
@@ -167,19 +173,19 @@ app.get("/api/stream", async (req, res) => {
       return res.send(rewritten);
     }
 
-    // Binary segments (TS, MP4, etc.) — stream via pipe, don't buffer
+    // TS segments and MP4 — pipe directly, never buffer
     const { Readable } = await import("stream");
     const nodeStream = Readable.fromWeb(upstream.body);
-    
-    // Forward content-length if available
     const contentLength = upstream.headers.get("content-length");
     if (contentLength) res.setHeader("Content-Length", contentLength);
+    res.setHeader("Accept-Ranges", "bytes");
 
     nodeStream.pipe(res);
     nodeStream.on("error", (err) => {
-      console.error("Stream pipe error:", err.message);
+      console.error("Pipe error:", err.message);
       if (!res.headersSent) res.status(500).end();
     });
+    res.on("close", () => nodeStream.destroy());
 
   } catch (error) {
     console.error("Stream error:", error.message);
