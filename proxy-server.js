@@ -1,4 +1,4 @@
-// Aura IPTV Proxy v6
+// Aura IPTV Proxy v7
 import express from "express";
 import cors from "cors";
 
@@ -173,19 +173,11 @@ app.get("/api/stream", async (req, res) => {
       return res.send(rewritten);
     }
 
-    // TS segments and MP4 — pipe directly, never buffer
-    const { Readable } = await import("stream");
-    const nodeStream = Readable.fromWeb(upstream.body);
-    const contentLength = upstream.headers.get("content-length");
-    if (contentLength) res.setHeader("Content-Length", contentLength);
-    res.setHeader("Accept-Ranges", "bytes");
-
-    nodeStream.pipe(res);
-    nodeStream.on("error", (err) => {
-      console.error("Pipe error:", err.message);
-      if (!res.headersSent) res.status(500).end();
-    });
-    res.on("close", () => nodeStream.destroy());
+    // TS segments and MP4 — redirect directly to source
+    // This avoids proxying binary data through Render (OOM on free tier)
+    // The upstream fetch already validated the URL is accessible
+    upstream.body?.cancel();
+    return res.redirect(302, decodedUrl);
 
   } catch (error) {
     console.error("Stream error:", error.message);
