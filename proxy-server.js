@@ -4,7 +4,14 @@ import cors from "cors";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+const corsOptions = {
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // handle preflight for all routes
 app.use(express.json());
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -17,9 +24,18 @@ function playerApi(serverUrl, username, password, params = "") {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Upstream error: ${response.status}`);
-  return response.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) throw new Error(`Upstream error: ${response.status}`);
+    return response.json();
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === "AbortError") throw new Error("Request to IPTV server timed out.");
+    throw err;
+  }
 }
 
 // ─── Health check ─────────────────────────────────────────────────────────────
@@ -141,10 +157,12 @@ app.get("/api/stream", async (req, res) => {
     if (!url) return res.status(400).json({ error: "Missing url parameter." });
 
     const decodedUrl = decodeURIComponent(url);
+    const isM3u8 = decodedUrl.includes(".m3u8") || decodedUrl.includes("m3u8");
 
     const upstream = await fetch(decodedUrl, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; AuraIPTV/1.0)"
+        "User-Agent": "Mozilla/5.0 (compatible; AuraIPTV/1.0)",
+        "Accept": "*/*"
       }
     });
 
@@ -152,34 +170,45 @@ app.get("/api/stream", async (req, res) => {
       return res.status(upstream.status).json({ error: `Upstream error: ${upstream.status}` });
     }
 
-    // Forward content-type and other relevant headers
-    const contentType = upstream.headers.get("content-type") || "application/octet-stream";
+    const contentType = upstream.headers.get("content-type") || 
+      (isM3u8 ? "application/vnd.apple.mpegurl" : "video/mp2t");
+
     res.setHeader("Content-Type", contentType);
     res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "*");
 
-    // For m3u8 playlists, rewrite segment URLs to go through proxy too
-    if (contentType.includes("mpegurl") || decodedUrl.includes(".m3u8")) {
+    // M3U8 playlist — rewrite segment URLs through proxy
+    if (isM3u8) {
       const text = await upstream.text();
       const baseUrl = decodedUrl.substring(0, decodedUrl.lastIndexOf("/") + 1);
 
       const rewritten = text.split("\n").map(line => {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith("#")) return line;
-        // Rewrite relative segment URLs to absolute, then proxy them
-        const absoluteUrl = trimmed.startsWith("http")
-          ? trimmed
-          : baseUrl + trimmed;
+        const absoluteUrl = trimmed.startsWith("http") ? trimmed : baseUrl + trimmed;
         return `/api/stream?url=${encodeURIComponent(absoluteUrl)}`;
       }).join("\n");
 
-      res.send(rewritten);
-    } else {
-      // Binary stream — pipe directly
-      const buffer = await upstream.arrayBuffer();
-      res.send(Buffer.from(buffer));
+      return res.send(rewritten);
     }
+
+    // Binary segments (TS, MP4, etc.) — stream via pipe, don't buffer
+    const { Readable } = await import("stream");
+    const nodeStream = Readable.fromWeb(upstream.body);
+    
+    // Forward content-length if available
+    const contentLength = upstream.headers.get("content-length");
+    if (contentLength) res.setHeader("Content-Length", contentLength);
+
+    nodeStream.pipe(res);
+    nodeStream.on("error", (err) => {
+      console.error("Stream pipe error:", err.message);
+      if (!res.headersSent) res.status(500).end();
+    });
+
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("Stream error:", error.message);
+    if (!res.headersSent) res.status(500).json({ error: error.message });
   }
 });
 
