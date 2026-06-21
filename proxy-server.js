@@ -87,35 +87,9 @@ app.post("/api/content", async (req, res) => {
   }
 });
 
-// ─── All content at once (live + movies + series) ────────────────────────────
-app.post("/api/content/all", async (req, res) => {
-  try {
-    const { serverUrl, username, password } = req.body;
-    if (!serverUrl || !username || !password)
-      return res.status(400).json({ error: "Missing required fields." });
-
-    const [
-      liveCats, liveItems,
-      movieCats, movieItems,
-      seriesCats, seriesItems
-    ] = await Promise.all([
-      fetchJson(playerApi(serverUrl, username, password, "&action=get_live_categories")),
-      fetchJson(playerApi(serverUrl, username, password, "&action=get_live_streams")),
-      fetchJson(playerApi(serverUrl, username, password, "&action=get_vod_categories")),
-      fetchJson(playerApi(serverUrl, username, password, "&action=get_vod_streams")),
-      fetchJson(playerApi(serverUrl, username, password, "&action=get_series_categories")),
-      fetchJson(playerApi(serverUrl, username, password, "&action=get_series"))
-    ]);
-
-    res.json({
-      live:   { categories: Array.isArray(liveCats)    ? liveCats    : [], items: Array.isArray(liveItems)    ? liveItems    : [] },
-      movies: { categories: Array.isArray(movieCats)   ? movieCats   : [], items: Array.isArray(movieItems)   ? movieItems   : [] },
-      series: { categories: Array.isArray(seriesCats)  ? seriesCats  : [], items: Array.isArray(seriesItems)  ? seriesItems  : [] }
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+// ─── Content by type (memory-safe — one type at a time) ──────────────────────
+// Replaces /api/content/all which caused OOM on free tier
+// Call separately for each type: live, movies, series
 
 // ─── VOD info (movie detail) ──────────────────────────────────────────────────
 app.post("/api/vod-info", async (req, res) => {
